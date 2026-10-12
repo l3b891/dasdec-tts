@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flite TTS</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Courier New', Courier, monospace;
+    background: #1a1a1a;
+    color: #d4d4d4;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 640px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  h1 {
+    font-size: 1rem;
+    font-weight: normal;
+    letter-spacing: 0.15em;
+    color: #888;
+    text-transform: uppercase;
+    margin-bottom: 0.25rem;
+  }
+
+  textarea {
+    width: 100%;
+    height: 180px;
+    background: #111;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    font-family: inherit;
+    font-size: 0.95rem;
+    padding: 0.75rem;
+    resize: vertical;
+    outline: none;
+    line-height: 1.5;
+  }
+  textarea:focus { border-color: #555; }
+
+  .params {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-end;
+  }
+
+  .param {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    flex: 1;
+  }
+
+  label {
+    font-size: 0.72rem;
+    color: #666;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  input[type="number"] {
+    width: 100%;
+    background: #111;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    font-family: inherit;
+    font-size: 0.9rem;
+    padding: 0.4rem 0.5rem;
+    outline: none;
+    -moz-appearance: textfield;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
+  input[type="number"]:focus { border-color: #555; }
+
+  .buttons {
+    display: flex;
+    gap: 0.75rem;
+  }
+
+  button {
+    font-family: inherit;
+    font-size: 0.85rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.55rem 1.2rem;
+    cursor: pointer;
+    border: 1px solid #444;
+    background: #222;
+    color: #bbb;
+    transition: background 0.1s, color 0.1s;
+  }
+  button:hover { background: #2e2e2e; color: #eee; }
+  button:active { background: #181818; }
+
+  #generateBtn {
+    border-color: #5a7a5a;
+    background: #1e2e1e;
+    color: #8ab88a;
+  }
+  #generateBtn:hover { background: #243024; color: #a0d0a0; }
+  #generateBtn:disabled {
+    border-color: #333;
+    background: #1a1a1a;
+    color: #555;
+    cursor: not-allowed;
+  }
+
+  #status {
+    font-size: 0.78rem;
+    color: #666;
+    min-height: 1.2em;
+    letter-spacing: 0.03em;
+  }
+  #status.error { color: #c07070; }
+  #status.ok { color: #70a070; }
+
+  #playerArea {
+    display: none;
+    flex-direction: column;
+    gap: 0.5rem;
+    border-top: 1px solid #2a2a2a;
+    padding-top: 1rem;
+  }
+
+  audio {
+    width: 100%;
+    height: 36px;
+    outline: none;
+  }
+
+  #downloadBtn {
+    align-self: flex-start;
+    font-size: 0.78rem;
+    padding: 0.35rem 0.8rem;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Flite TTS <a href="https://github.com/l3b891/dasdec-tts">Github Repo</a></h1>
+
+  <textarea id="textInput" placeholder="Enter text to synthesize...">Hello, this is a test of the Flite speech synthesizer running in WebAssembly.</textarea>
+
+  <div class="params">
+    <div class="param">
+      <label>f0 mean</label>
+      <input type="number" id="f0mean" value="115" step="1">
+    </div>
+    <div class="param">
+      <label>f0 stddev</label>
+      <input type="number" id="f0stddev" value="25" step="1">
+    </div>
+    <div class="param">
+      <label>duration stretch</label>
+      <input type="number" id="durstretch" value="1.1" step="0.01">
+    </div>
+  </div>
+
+  <div class="buttons">
+    <button id="generateBtn">Generate</button>
+    <button id="resetBtn">Reset Options</button>
+  </div>
+
+  <div id="status">Loading flite.wasm...</div>
+
+  <div id="playerArea">
+    <audio id="audioPlayer" controls></audio>
+    <button id="downloadBtn">Download output.wav</button>
+  </div>
+</div>
+
+<script type="module">
+import { WASI, File, OpenFile, ConsoleStdout, PreopenDirectory, Directory } from './wasi_shim.js';
+
+const generateBtn = document.getElementById('generateBtn');
+const resetBtn = document.getElementById('resetBtn');
+const status = document.getElementById('status');
+const playerArea = document.getElementById('playerArea');
+const audioPlayer = document.getElementById('audioPlayer');
+const downloadBtn = document.getElementById('downloadBtn');
+
+let fliteModule = null;
+let lastWavData = null;
+
+function setStatus(msg, cls = '') {
+  status.textContent = msg;
+  status.className = cls;
+}
+
+// Load the wasm module
+async function loadFlite() {
+  try {
+    setStatus('Loading flite.wasm (~4 MB)...');
+    const response = await fetch('./flite.wasm');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const bytes = await response.arrayBuffer();
+    fliteModule = await WebAssembly.compile(bytes);
+    setStatus('Ready.', 'ok');
+    generateBtn.disabled = false;
+  } catch (e) {
+    setStatus('Failed to load flite.wasm: ' + e.message, 'error');
+  }
+}
+
+async function generate() {
+  if (!fliteModule) return;
+
+  const text = document.getElementById('textInput').value.trim();
+  if (!text) { setStatus('No text entered.', 'error'); return; }
+
+  const f0mean = parseFloat(document.getElementById('f0mean').value);
+  const f0stddev = parseFloat(document.getElementById('f0stddev').value);
+  const durstretch = parseFloat(document.getElementById('durstretch').value);
+
+  generateBtn.disabled = true;
+  setStatus('Synthesizing...');
+
+  try {
+    // In-memory filesystem: input.txt (the text) + output.wav
+    const encoder = new TextEncoder();
+    const inputFile = new File(encoder.encode(text).buffer);
+    const outputFile = new File(new ArrayBuffer(0));
+    const contentsMap = new Map([
+      ['input.txt', inputFile],
+      ['output.wav', outputFile],
+    ]);
+
+    const fds = [
+      new OpenFile(new File(new ArrayBuffer(0))),   // stdin
+      ConsoleStdout.lineBuffered(line => console.log('[flite stdout]', line)),
+      ConsoleStdout.lineBuffered(line => console.warn('[flite stderr]', line)),
+      new PreopenDirectory('.', contentsMap),
+    ];
+
+    const args = [
+      'flite',
+      '-o', './output.wav',
+      '-f', './input.txt',
+      '--setf', `int_f0_target_mean=${f0mean}`,
+      '--setf', `int_f0_target_stddev=${f0stddev}`,
+      '--setf', `duration_stretch=${durstretch}`,
+    ];
+
+    const wasi = new WASI(args, [], fds);
+
+    const instance = await WebAssembly.instantiate(fliteModule, {
+      wasi_snapshot_preview1: wasi.wasiImport,
+    });
+
+    const exitCode = wasi.start(instance);
+
+    if (exitCode !== 0) {
+      throw new Error(`Flite exited with code ${exitCode}`);
+    }
+
+    // Read the output file back from the virtual FS
+    const outInode = contentsMap.get('output.wav');
+    if (!outInode || outInode.data.byteLength === 0) {
+      throw new Error('output.wav was not written or is empty');
+    }
+
+    lastWavData = outInode.data.slice();
+    const blob = new Blob([lastWavData], { type: 'audio/wav' });
+    const url = URL.createObjectURL(blob);
+
+    // Revoke previous URL
+    if (audioPlayer.src && audioPlayer.src.startsWith('blob:')) {
+      URL.revokeObjectURL(audioPlayer.src);
+    }
+
+    audioPlayer.src = url;
+    playerArea.style.display = 'flex';
+    audioPlayer.play();
+
+    setStatus(`Done. ${(lastWavData.byteLength / 1024).toFixed(1)} KB WAV generated.`, 'ok');
+  } catch (e) {
+    setStatus('Error: ' + e.message, 'error');
+    console.error(e);
+  } finally {
+    generateBtn.disabled = false;
+  }
+}
+
+resetBtn.addEventListener('click', () => {
+  document.getElementById('f0mean').value = '115';
+  document.getElementById('f0stddev').value = '25';
+  document.getElementById('durstretch').value = '1.1';
+});
+
+generateBtn.addEventListener('click', generate);
+
+downloadBtn.addEventListener('click', () => {
+  if (!lastWavData) return;
+  const blob = new Blob([lastWavData], { type: 'audio/wav' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'output.wav';
+  a.click();
+});
+
+generateBtn.disabled = true;
+loadFlite();
+</script>
+</body>
+</html>
